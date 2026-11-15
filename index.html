@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0d0d0d">
+<title>Traffic Lights BLE</title>
+<!--
+  Traffic Light Scanner — Bluetooth LE view. Self-contained (no server needed): it talks to the
+  scanner directly over Bluetooth with Web Bluetooth. On an iPhone open it in the Bluefy app
+  (Safari has no Web Bluetooth); Bluefy requires the page to be served over HTTPS, so host this
+  one file on any HTTPS static host. Protocol: tlscan/gui/ble.py.
+-->
+<style>
+:root {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #232321; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --border: rgba(255,255,255,.10); --accent: #3987e5; --good: #0ca30c; --crit: #d03b3b;
+  --lamp-off: #2e2e2b; --housing: #111110; --lamp-red: #ff453a; --lamp-yellow: #ffd60a; --lamp-green: #30d158;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f1f0ec; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --border: rgba(11,11,11,.10); --accent: #2a78d6; --lamp-off: #d9d8d2; --housing: #2b2b29;
+    --lamp-red: #e5261b; --lamp-yellow: #f5b800; --lamp-green: #13a538;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding: max(12px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+h1 { font-size: 18px; margin: 0; font-weight: 650; }
+h1 span { color: var(--muted); font-weight: 450; }
+.spacer { flex: 1; }
+button { font: inherit; font-weight: 600; color: #fff; background: var(--accent); border: 0; border-radius: 10px; padding: 10px 16px; cursor: pointer; }
+button.ghost { background: var(--surface-2); color: var(--ink); border: 1px solid var(--border); }
+.status { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 14px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+.dot.on { background: var(--good); }
+.dot.bad { background: var(--crit); }
+.note { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; color: var(--ink-2); margin-bottom: 12px; }
+.note b { color: var(--ink); }
+.inter { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; margin-bottom: 12px; }
+.inter.stale { opacity: .55; }
+.inter .top { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; margin-bottom: 10px; }
+.inter .name { font-weight: 650; font-size: 17px; }
+.inter .meta { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.heads { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.head { display: flex; gap: 10px; align-items: center; }
+.housing { background: var(--housing); border-radius: 10px; padding: 5px; display: flex; flex-direction: column; gap: 4px; }
+.lamp { width: 24px; height: 24px; border-radius: 50%; background: var(--lamp-off); }
+.lamp.r.on { background: var(--lamp-red); box-shadow: 0 0 10px var(--lamp-red); }
+.lamp.y.on { background: var(--lamp-yellow); box-shadow: 0 0 10px var(--lamp-yellow); }
+.lamp.g.on { background: var(--lamp-green); box-shadow: 0 0 10px var(--lamp-green); }
+.lamp.flash { animation: flash 1s steps(1) infinite; }
+@keyframes flash { 50% { background: var(--lamp-off); box-shadow: none; } }
+.gid { color: var(--muted); font-size: 12px; }
+.phase { font-weight: 600; font-size: 14px; }
+.cd { font-size: 30px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.cd small { font-size: 14px; font-weight: 450; color: var(--muted); }
+.empty { color: var(--muted); padding: 20px 4px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Traffic Lights <span>· Bluetooth</span></h1>
+  <span class="spacer"></span>
+  <span class="status"><span class="dot" id="dot"></span><span id="stat">not connected</span></span>
+  <button id="btn">Connect</button>
+</header>
+<div id="note"></div>
+<div id="list"><div class="empty">Tap <b>Connect</b> and pick “TLS Scan”.</div></div>
+<script>
+"use strict";
+const SERVICE = "7c1a0001-5f1e-4c8e-9b8a-2d7e6c1f0a10";
+const STATE = "7c1a0002-5f1e-4c8e-9b8a-2d7e6c1f0a10";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const COLOUR_TEXT = { r: "Red", y: "Yellow", g: "Green", o: "Red + yellow", d: "Dark", u: "Unknown" };
+const LAMP = { r: "r", o: "r", y: "y", g: "g" };
+let device = null, chr = null, doc = null, gotAt = 0, frames = { seq: -1, n: 0, parts: [] }, wantConnected = false;
+
+function setStatus(text, cls = "") { $("stat").textContent = text; $("dot").className = "dot " + cls; }
+
+if (!navigator.bluetooth) {
+  $("note").innerHTML = `<div class="note"><b>Bluetooth isn't available in this browser.</b><br>
+    On an iPhone, open this page in the free <b>Bluefy</b> app (Safari can't use Bluetooth). On Android or a computer, use Chrome.
+    The page has to be opened from an <b>https://</b> address.</div>`;
+  $("btn").disabled = true;
+}
+
+function onDoc(d) { doc = d; gotAt = performance.now(); render(); }
+
+function onFrame(ev) {
+  const v = new Uint8Array(ev.target.value.buffer, ev.target.value.byteOffset, ev.target.value.byteLength);
+  if (v.length < 3) return;
+  const seq = v[0], idx = v[1], n = v[2];
+  if (seq !== frames.seq) frames = { seq, n, parts: new Array(n) };
+  frames.parts[idx] = v.slice(3);
+  if (frames.parts.filter(Boolean).length === n) {
+    const total = frames.parts.reduce((a, p) => a + p.length, 0), all = new Uint8Array(total);
+    let o = 0; for (const p of frames.parts) { all.set(p, o); o += p.length; }
+    try { onDoc(JSON.parse(new TextDecoder().decode(all))); } catch (e) { /* a torn update: the next one fixes it */ }
+    frames = { seq: -1, n: 0, parts: [] };
+  }
+}
+
+async function connect() {
+  try {
+    if (!device) {
+      device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE] }] });
+      device.addEventListener("gattserverdisconnected", onDisconnect);
+    }
+    wantConnected = true;
+    setStatus("connecting…");
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SERVICE);
+    chr = await svc.getCharacteristic(STATE);
+    try { onDoc(JSON.parse(new TextDecoder().decode(await chr.readValue()))); } catch (e) {}
+    chr.addEventListener("characteristicvaluechanged", onFrame);
+    await chr.startNotifications();
+    setStatus("connected · " + (device.name || "TLS Scan"), "on");
+    $("btn").textContent = "Disconnect"; $("btn").className = "ghost";
+  } catch (e) {
+    setStatus(e.name === "NotFoundError" ? "no scanner chosen" : "couldn't connect: " + e.message, "bad");
+    if (wantConnected && device) setTimeout(() => wantConnected && connect(), 3000);
+  }
+}
+function onDisconnect() {
+  setStatus("connection lost — reconnecting…", "bad");
+  if (wantConnected) setTimeout(connect, 1500);
+}
+$("btn").onclick = () => {
+  if (device && device.gatt.connected) { wantConnected = false; device.gatt.disconnect(); setStatus("disconnected"); $("btn").textContent = "Connect"; $("btn").className = ""; }
+  else connect();
+};
+
+function render() {
+  if (!doc) return;
+  if (!doc.i || !doc.i.length) { $("list").innerHTML = `<div class="empty">Connected. No traffic light heard yet${doc.r ? " — scanning…" : " (the scanner is stopped)"}.</div>`; return; }
+  $("list").innerHTML = doc.i.map((i) => `<div class="inter${i.x ? " stale" : ""}">
+    <div class="top"><span class="name">${esc(i.n)}</span><span class="meta" data-age="${i.a ?? ""}">${i.x ? "stale" : ""}</span></div>
+    <div class="heads">${i.g.map(([id, c, fl, rem, prot]) => {
+      const lit = LAMP[c] || "", f = fl ? " flash" : "";
+      const lamp = (k) => `<div class="lamp ${k}${lit === k || (c === "o" && k === "y") ? " on" + f : ""}"></div>`;
+      const txt = (fl ? "Flashing " + COLOUR_TEXT[c].toLowerCase() : COLOUR_TEXT[c]) + (prot && c === "g" ? " (protected)" : "");
+      return `<div class="head"><div class="housing" role="img" aria-label="${txt}">${lamp("r")}${lamp("y")}${lamp("g")}</div>
+        <div><div class="gid">Signal group ${id}</div><div class="phase">${txt}</div><div class="cd" data-rem="${rem ?? ""}">—</div></div></div>`;
+    }).join("")}</div></div>`).join("");
+  tick();
+}
+function tick() {
+  if (!doc) return;
+  const dt = (performance.now() - gotAt) / 1000;              // seconds since this update arrived
+  for (const el of document.querySelectorAll(".cd")) {
+    if (el.dataset.rem === "") { el.innerHTML = "<small>no timing</small>"; continue; }
+    const s = +el.dataset.rem / 10 - dt;
+    el.innerHTML = s >= 0 ? `${s.toFixed(1)}<small> s</small>` : `<small>changing…</small>`;
+  }
+  for (const el of document.querySelectorAll("[data-age]")) {
+    if (el.dataset.age === "" || el.textContent === "stale") continue;
+    el.textContent = `heard ${(+el.dataset.age / 10 + dt).toFixed(0)} s ago`;
+  }
+}
+setInterval(tick, 100);
+</script>
+</body>
+</html>
